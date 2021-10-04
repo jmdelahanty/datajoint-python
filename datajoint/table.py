@@ -351,10 +351,9 @@ class Table(QueryExpression):
     def _delete_cascade(self):
         """service function to perform cascading deletes recursively."""
         max_attempts = 50
-        delete_count = 0
         for _ in range(max_attempts):
             try:
-                delete_count += self.delete_quick(get_count=True)
+                delete_count = self.delete_quick(get_count=True)
             except IntegrityError as error:
                 match = foreign_key_error_regexp.match(error.args[0]).groupdict()
                 if "`.`" not in match['child']:  # if schema name missing, use self
@@ -383,7 +382,7 @@ class Table(QueryExpression):
                                                   match['pk_attrs'])))
                 else:
                     child &= self.proj()
-                delete_count += child._delete_cascade()
+                child._delete_cascade()
             else:
                 print("Deleting {count} rows from {table}".format(
                     count=delete_count, table=self.full_table_name))
@@ -399,6 +398,7 @@ class Table(QueryExpression):
         :param transaction: if True, use the entire delete becomes an atomic transaction.
         :param safemode: If True, prohibit nested transactions and prompt to confirm. Default
             is dj.config['safemode'].
+        :return: number of deleted rows (excluding those from dependent tables)
         """
         safemode = config['safemode'] if safemode is None else safemode
 
@@ -439,6 +439,7 @@ class Table(QueryExpression):
                     self.connection.cancel_transaction()
                 if safemode:
                     print('Deletes cancelled')
+        return delete_count
 
     def drop_quick(self):
         """
@@ -585,7 +586,7 @@ class Table(QueryExpression):
             value = blob.pack(value)
             placeholder = '%s'
         elif attr.numeric:
-            if value is None or np.isnan(np.float(value)):  # nans are turned into NULLs
+            if value is None or np.isnan(float(value)):  # nans are turned into NULLs
                 placeholder = 'NULL'
                 value = None
             else:
@@ -614,7 +615,7 @@ class Table(QueryExpression):
         attr = self.heading[name]
         if attr.adapter:
             value = attr.adapter.put(value)
-        if value is None or (attr.numeric and (value == '' or np.isnan(np.float(value)))):
+        if value is None or (attr.numeric and (value == '' or np.isnan(float(value)))):
             # set default value
             placeholder, value = 'DEFAULT', None
         else:  # not NULL
@@ -720,14 +721,18 @@ def lookup_class_name(name, context, depth=3):
                     if member.full_table_name == name:   # found it!
                         return '.'.join([node['context_name'],  member_name]).lstrip('.')
                     try:  # look for part tables
-                        parts = member._ordered_class_members
+                        parts = member.__dict__
                     except AttributeError:
                         pass  # not a UserTable -- cannot have part tables.
                     else:
-                        for part in (getattr(member, p) for p in parts if p[0].isupper() and hasattr(member, p)):
-                            if inspect.isclass(part) and issubclass(part, Table) and part.full_table_name == name:
-                                return '.'.join([node['context_name'], member_name, part.__name__]).lstrip('.')
-                elif node['depth'] > 0 and inspect.ismodule(member) and member.__name__ != 'datajoint':
+                        for part in (getattr(member, p) for p in parts
+                                     if p[0].isupper() and hasattr(member, p)):
+                            if inspect.isclass(part) and issubclass(part, Table) and \
+                                    part.full_table_name == name:
+                                return '.'.join([node['context_name'],
+                                                 member_name, part.__name__]).lstrip('.')
+                elif node['depth'] > 0 and inspect.ismodule(member) and \
+                        member.__name__ != 'datajoint':
                     try:
                         nodes.append(
                             dict(context=dict(inspect.getmembers(member)),
@@ -818,8 +823,11 @@ class Log(Table):
                 logger.info('could not log event in table ~log')
 
     def delete(self):
-        """bypass interactive prompts and cascading dependencies"""
-        self.delete_quick()
+        """
+        bypass interactive prompts and cascading dependencies
+        :return: number of deleted items
+        """
+        return self.delete_quick(get_count=True)
 
     def drop(self):
         """bypass interactive prompts and cascading dependencies"""
